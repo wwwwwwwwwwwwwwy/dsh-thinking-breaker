@@ -80,10 +80,34 @@ The full recommended block lives in [`cordis.patch.yml`](./cordis.patch.yml). Ev
 ## Verify
 
 ```bash
+npm run check     # everything below in one shot: no network, no install
 npm test          # 59 tests
 npm run calibrate # re-measure the thresholds
 npm run verify    # cordis contract regression
 ```
+
+On Windows use `check.cmd`; on Linux/macOS use `./check.sh`.
+
+### CI status
+
+The workflow lives at [`ci.yml.txt`](./ci.yml.txt), **not** under `.github/workflows/`.
+That is not a typo. Publishing a file under `.github/workflows/` through the GitHub
+Contents API requires a token carrying the **`workflow`** scope, and the token used to
+publish this repository does not have it — the API answers `404 Not Found`, which is the
+scope refusal presented as a missing resource.
+
+To enable CI, either:
+
+```bash
+# with git, from a clone
+git mv ci.yml.txt .github/workflows/ci.yml
+git commit -m "ci: enable workflow" && git push
+```
+
+or add the `workflow` scope to a token and re-run the API push for that path, or paste the
+file's contents into a new workflow through the GitHub web UI.
+
+Until then, `npm run check` runs exactly the same checks locally.
 
 ## Install
 
