@@ -1,0 +1,63 @@
+{
+  "name": "dsh-thinking-breaker",
+  "version": "1.1.0",
+  "description": "DSH host plugin: two circuit breakers — abort a runaway reasoning (thinking) loop and force a fresh no-think retry, and stop/steer repeated tool failures before they are re-run.",
+  "type": "module",
+  "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wwwwwwwwwwwwwwy/dsh-thinking-breaker.git"
+  },
+  "homepage": "https://github.com/wwwwwwwwwwwwwwy/dsh-thinking-breaker#readme",
+  "bugs": {
+    "url": "https://github.com/wwwwwwwwwwwwwwy/dsh-thinking-breaker/issues"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./detector": {
+      "default": "./lib/detector.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "test",
+    "tools",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "README.zh.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/detector.test.mjs test/plugin.test.mjs",
+    "calibrate": "node tools/calibrate.mjs",
+    "verify": "node tools/verify-cordis-contract.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "circuit-breaker",
+    "reasoning-loop",
+    "thinking-loop",
+    "agent"
+  ],
+  "license": "MIT"
+}
+
