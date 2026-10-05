@@ -1,0 +1,13 @@
+{
+  "id": "dsh-external/dsh-thinking-breaker",
+  "version": "1.1.0",
+  "main": "./lib/index.js",
+  "description": "Circuit breaker for runaway reasoning streams: detects repeated/non-novel thinking inside one model request, aborts it, and forces reasoningEffort=off for that session's next request.",
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  }
+}
