@@ -46,7 +46,8 @@
   "scripts": {
     "test": "node --test test/detector.test.mjs test/plugin.test.mjs",
     "calibrate": "node tools/calibrate.mjs",
-    "verify": "node tools/verify-cordis-contract.mjs"
+    "verify": "node tools/verify-cordis-contract.mjs",
+    "check": "node tools/check.mjs"
   },
   "keywords": [
     "dsh",
