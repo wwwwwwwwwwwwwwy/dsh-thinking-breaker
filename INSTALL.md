@@ -98,3 +98,22 @@ Or set the row itself to `disabled: true`.
 Full rollback: remove the entry from `dsh.profile.bundles` and from `dependencies` in the profile's `package.json`, run `pnpm install`, and restart.
 
 The plugin writes no files, makes no network requests, and never modifies session history, so removing it leaves nothing behind.
+
+## A note on profile secrets
+
+This plugin needs no credentials and stores none. While installing it, however, a real
+hazard in the *profile* surfaced that is worth repeating here, because it is easy to miss:
+
+A profile's `cordis.patch.yml` commonly carries inline secrets — for example an MCP client
+row with `headers: { Authorization: Bearer <token> }`. Those live in plain text on disk, are
+copied into any backup of the profile, and are readable by anything that can read the file.
+
+If a token sits there, treat it as exposed and **rotate it at the provider**. When you put a
+new one in place:
+
+- prefer the provider's own reference mechanism over an inline literal when one exists
+  (`apiKeyEnv: NAME` reads a named environment variable; not every credential field offers
+  that, and MCP `headers` values are plain YAML strings);
+- scope the token to what the integration actually needs — a read-only MCP integration does
+  not need `repo` or `delete_repo`;
+- keep a copy of the config without secrets if you back the profile up.
