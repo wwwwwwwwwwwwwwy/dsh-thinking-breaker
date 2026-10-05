@@ -1,0 +1,45 @@
+# dsh bundle layer: insert the thinking-breaker host plugin into the profile roster.
+#
+# The `config:` block below is the RECOMMENDED starting point. Every key is
+# optional — the plugin's own defaults are the same as the values shown here, so
+# uncommenting the block changes nothing except making the knobs visible.
+#
+# One host row, no client row: the plugin ships no UI of its own.
+- insert:
+    - id: dsh-thinking-breaker
+      name: dsh-thinking-breaker
+      config:
+        enabled: true
+
+        # ---- A. reasoning-loop breaker ----
+        # Hard ceiling on one response's reasoning characters (0 = no ceiling).
+        maxReasoningChars: 120000
+        # After a trip, retry the step once with thinking forced off.
+        retryWithoutThinking: true
+        # Loop aborts allowed to be retried per turn; 0 = let the turn stop.
+        maxLoopRetriesPerTurn: 1
+        # Tell the model on its next tool result not to resume the aborted line.
+        postTripHint: true
+        # Hard output ceiling applied while armed (0 = leave the value alone).
+        maxTokens: 0
+        # Skip auxiliary calls (title generation) — never loop-prone.
+        skipAuxCalls: true
+
+        # ---- B. repeated-tool-failure breaker ----
+        toolFailureGuard: true
+        # Inject change-approach guidance from this many failures in a turn.
+        toolFailureSteerAfter: 2
+        # Deny the identical call before dispatch from this many failures.
+        toolFailureDenyAfter: 3
+        # Failures remembered per turn.
+        toolFailureHistory: 64
+        # 'text' = tool + args + code + normalized error text; 'code' = code only.
+        toolFailureSignatures: text
+
+        # ---- detector (defaults are measured; see tools/calibrate.mjs) ----
+        blockChars: 128
+        historyBlocks: 32
+        minRepeatGap: 3
+        noveltyOverlap: 0.7
+        # 10 consecutive repeated blocks = 1280 code units before aborting.
+        noveltyStreak: 10
