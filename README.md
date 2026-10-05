@@ -7,6 +7,14 @@
 
 English | [简体中文](./README.zh.md)
 
+## Install
+
+```bash
+dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
+```
+
+Then **restart the host** — ESM caches are per-process. Full instructions, including the `link:` caveat and rollback, are in [INSTALL.md](./INSTALL.md).
+
 ---
 
 ## Why a plugin and not just a prompt
