@@ -36,6 +36,34 @@
         # 'text' = tool + args + code + normalized error text; 'code' = code only.
         toolFailureSignatures: text
 
+        # ---- A2. degenerate output (a wall of *** / emoji) ----
+        # Answers "has this stopped meaning anything", where the loop rule above
+        # answers "has this been said before". Either one aborts the request.
+        degeneracyGuard: true
+        # Also watch the ANSWER stream. Off by default: aborting a thought is
+        # cheap, aborting output the user is already reading is not.
+        degeneracyOnAnswer: false
+        # Secondary evidence flags required, on top of the `meaningless` gate.
+        # 2 is measured: 1 trips on legitimate markdown, 3 misses two real floods.
+        degEvidenceMin: 2
+        # Consecutive degenerate blocks before aborting (2 blocks = 256 code units).
+        degStreak: 2
+        # GATE: letters + digits / non-space at or below this = "no words left".
+        # This is what makes markdown tables, code, base64 and numeric tables
+        # structurally safe: they all contain words, so they can never be flagged.
+        degMeaningRatioMax: 0.08
+        # SIGNAL: punctuation + emoji / non-space at or above this.
+        degNoiseRatioMin: 0.65
+        # SIGNAL: distinct glyphs / first 48 non-space at or below this.
+        degVarietyRatioMax: 0.3
+        # SIGNAL: one symbol run at least this long (a `====` rule is ONE run).
+        degRunLenMin: 24
+        # SIGNAL: this many symbol runs of >= 3 code points (a `***` flood is many).
+        degRunCountMin: 3
+        # SIGNAL: at least this many emoji in one block, and at least this dense.
+        degEmojiMin: 8
+        degEmojiRatioMin: 0.4
+
         # ---- detector (defaults are measured; see tools/calibrate.mjs) ----
         blockChars: 128
         historyBlocks: 32

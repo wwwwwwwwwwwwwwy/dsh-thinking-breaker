@@ -35,13 +35,13 @@ jobs:
           fi
           echo "clean checkout: no node_modules, as expected"
 
-      - name: Detector + plugin test suite
-        run: node --test test/detector.test.mjs test/plugin.test.mjs
+      - name: Detector + degeneracy + plugin test suite
+        run: node --test test/detector.test.mjs test/degeneracy.test.mjs test/plugin.test.mjs
 
       - name: Host contract regression (the cordis schema.validate crash guard)
         run: node tools/verify-cordis-contract.mjs
 
-      - name: Threshold calibration must still separate loops from clean corpora
+      - name: Threshold calibration must still separate loops and floods from clean corpora
         run: node tools/calibrate.mjs
 
   package:
@@ -56,7 +56,7 @@ jobs:
       - name: npm pack must succeed and include the runtime files
         run: |
           npm pack --dry-run 2>&1 | tee pack.txt
-          for f in lib/index.js lib/detector.js lib/schema-fallback.js \
+          for f in lib/index.js lib/detector.js lib/degeneracy.js lib/schema-fallback.js \
                    cordis.patch.yml dsh.plugin.json README.md LICENSE; do
             grep -q "$f" pack.txt || { echo "MISSING from package: $f"; exit 1; }
           done

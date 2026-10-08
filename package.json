@@ -1,7 +1,7 @@
 {
   "name": "dsh-thinking-breaker",
-  "version": "1.1.0",
-  "description": "DSH host plugin: two circuit breakers — abort a runaway reasoning (thinking) loop and force a fresh no-think retry, and stop/steer repeated tool failures before they are re-run.",
+  "version": "1.2.0",
+  "description": "DSH host plugin: three circuit breakers — abort a runaway reasoning (thinking) loop, abort a reasoning stream that has degenerated into *** or emoji with no words left, and stop/steer repeated tool failures before they are re-run.",
   "type": "module",
   "main": "lib/index.js",
   "repository": {
@@ -44,7 +44,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/detector.test.mjs test/plugin.test.mjs",
+    "test": "node --test test/detector.test.mjs test/degeneracy.test.mjs test/plugin.test.mjs",
     "calibrate": "node tools/calibrate.mjs",
     "verify": "node tools/verify-cordis-contract.mjs",
     "check": "node tools/check.mjs"
@@ -57,6 +57,8 @@
     "circuit-breaker",
     "reasoning-loop",
     "thinking-loop",
+    "degenerate-output",
+    "emoji-flood",
     "agent"
   ],
   "license": "MIT"

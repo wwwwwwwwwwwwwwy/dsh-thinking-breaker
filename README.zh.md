@@ -1,8 +1,9 @@
 # dsh-thinking-breaker
 
-DSH（DeepSeek Harness）宿主插件：**两个熔断**，一个文件。
+DSH（DeepSeek Harness）宿主插件：**三个熔断**，一个文件。
 
 - **A. 思考循环熔断** —— 推理流里出现连续 ≥10 次重复时，立刻中止本次请求，并被**强制以"不思考"的方式重新做一次**（重新思考）；重试用尽则让该轮正常终止。
+- **A2. 退化输出熔断** —— 推理流**不再承载任何语义**时（字面星号 `***`、`*****`、轮转 emoji 刷屏、标点糊），以同样方式立刻中止，而且**只要两个块（256 码元）**，不用等重复被确认。
 - **B. 工具失败熔断** —— 同一个工具调用在**同一轮内**反复以同类错误失败时，先注入"换做法"的明确指令；再犯就直接**在派发前拒绝**这次相同调用，逼模型换路径。
 
 ## 安装
@@ -13,18 +14,16 @@ dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
 
 装完**必须重启宿主**（ESM 缓存是进程级的）。完整说明（含 `link:` 安装的坑与回滚）见 [INSTALL.md](./INSTALL.md)。
 
-两者都合并进同一个插件，不再是两个 skill。
-
 ## 为什么技能层做不到这件事
 
 技能（`~/.dsh/skills/`）是模型**主动加载**的说明文档。模型已经陷进思考循环时，它读不到技能；而"思考中"没有任何机制能打断它。所以真正的中断必须发生在宿主层——也就是这个插件。技能只负责说明与调参。
 
-## 四个钩子（全部对着实测契约写）
+## 钩子（全部对着实测契约写）
 
 | 钩子 | 作用 |
 |---|---|
-| `llm/stream`（prepend） | 逐块读 `reasoning-delta` 喂给纯检测器。命中即**静默排空**后续 chunk（让 provider 流干净关闭），然后产出**终态 `finish` chunk**（`kind: 'aborted'`）。 |
-| `agent/request-error`（prepend） | 只回收**本插件自己**的循环中止：返回 `{ kind: 'retry' }`，在本轮重试预算内让这一步重做一次。其他失败一律 `next()` 交回宿主。 |
+| `llm/stream`（prepend） | 逐块读 `reasoning-delta`，同时喂给**两个**纯检测器（重复 / 退化）；`degeneracyOnAnswer` 打开时再喂一个给 `text-delta`。命中即**静默排空**后续 chunk（让 provider 流干净关闭），然后产出**终态 `finish` chunk**（`kind: 'aborted'`）。 |
+| `agent/request-error`（prepend） | 只回收**本插件自己**的中止：返回 `{ kind: 'retry' }`，在本轮重试预算内让这一步重做一次。其他失败一律 `next()` 交回宿主。 |
 | `agent/request`（prepend） | 记录会话本轮；熔断后把这次重试请求强制成 `reasoningEffort: 'off'` —— **重做时直接作答，不再推理**，这才是真正打断循环的点。 |
 | `tools/post-execute`（prepend） | ① 在熔断后的**下一个工具结果**上投递"不要沿那条线继续"的指引；② 工具反复失败时注入换做法指令。 |
 | `tools/pre-execute`（prepend） | 参数未变的相同失败调用达到阈值后，**在派发前直接拒绝**。 |
@@ -36,6 +35,80 @@ dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
 2. **终态用 `aborted` 而不是 `error`。** 可重试集合是 `EMPTY_RESPONSE | RATE_LIMIT | SERVER | TIMEOUT | TRANSPORT`，**`ABORTED` 不在其中**。所以默认行为是终态（安全），而重试是**我们在 `agent/request-error` 里显式接管**的——只放行一次，用完即回落到终态。这样既满足"立刻中止"，又不会变成无限重试。
 
 3. **工具门禁的签名只看"工具 + 归一化参数"。** 派发前还没有结果，签名里若掺入错误文本，永远匹配不上 post-execute 记录的东西。所以引导用"参数 + 错误码 + 归一化错误文本"，而**门禁只用"工具 + 参数"**。参数里的数字/十六进制会被折叠，因此"只改了个行号/路径片段"的盲重试同样会被拦下；而结构性换了做法的调用会得到全新签名，正常放行。
+
+## 检测算法 A：重复
+
+流被切成**互不重叠的块**（`blockChars`，默认 128 UTF-16 码元）；每块产出
+
+- 一个 **128 位整块指纹**（四个独立 FNV-1a 种子）→ `exact-repeat`；
+- 一组 **4 码元 shingle**，与近期块做 Jaccard 重叠 → 连续 `noveltyStreak` 块后 `low-novelty`。
+
+## 检测算法 B：退化输出（第二个透镜）
+
+代码见 [`lib/degeneracy.js`](./lib/degeneracy.js)。透镜 A 问的是「这句话是不是说过了」，透镜 B 问的是「这句话还说不说得通」。它量的是**一个块由什么构成**，而不是拿它跟谁比。
+
+每块最多产出五个证据标记，判定规则是：
+
+```
+degenerate(block)  =  meaningless（硬门槛）  AND  至少 degEvidenceMin 项其他证据
+```
+
+| 标记 | 读什么 | 何时成立 |
+|---|---|---|
+| `meaningless` | 字母 + 数字 / 非空白 | **硬门槛**：已经没有实词了 |
+| `noisy` | 标点 + emoji / 非空白 | 整块基本都是符号 |
+| `low-variety` | 前 48 个非空白的去重码点数 | 反复用那几个字形 |
+| `run-heavy` | 最长 / 符号连跑（≥3）的个数 | 一条离谱的长连跑，或者很多条 |
+| `emoji-flood` | emoji 数量与密度 | emoji 就是这块的全部内容 |
+
+触发后按**最具体的那条证据**命名：`symbol-flood` / `emoji-flood` / `degenerate-output`。
+
+### 为什么是"硬门槛 + 投票"，而不是一条规则
+
+`meaningless` 是**硬门槛**，不是一票。这样换来的是一条**性质**，而不是一个调出来的阈值：
+
+> **任何还带实词的块，永远不可能被判为退化。**
+
+所有误报风险——markdown 表格、密集代码、base64、数字表、箭头链、JSON、夹在正文里的 `====` 分隔线、作为标注的 emoji——**都含实词，因此都被结构性排除**。这一点是量出来的，不是声称的：`tools/calibrate.mjs` 报出**去掉门槛会有 3 个正常语料被误判**，拦住它们的正是门槛。
+
+剩下的标记互相投票，所以规则仍是多维的，而不是单一测试。用 OR 会打在正常 markdown 上，而"不影响正常思考"在这里是硬要求，不是偏好。
+
+`run-heavy` 负责把 `***` 刷屏和 `====` 分隔线区分开：**分隔线只有一条连跑，刷屏有很多条**。两种都覆盖（`degRunCountMin` / `degRunLenMin`），且都不足以单独定罪。
+
+### 阈值：量出来的，不是拍的
+
+`tools/calibrate.mjs` 用 11 个退化语料对 11 个正常语料做扫描，对每个 `evidenceMin × streak` 组合报出 `正常误报数 / 退化漏报数`：
+
+| `evidenceMin` | streak 1 | streak 2 | streak 3 | streak 4 |
+|---|---|---|---|---|
+| 1 | **1 / 0** | 0 / 0 | 0 / 0 | 0 / 2 |
+| 2 | **1 / 0** | **0 / 0** ← 默认 | 0 / 0 | 0 / 2 |
+| 3 | 1 / 2 | 0 / 2 | 0 / 2 | 0 / 4 |
+| 4 | 0 / 10 | 0 / 10 | 0 / 10 | 0 / 10 |
+
+默认的 `2 / 2` 是"什么都不漏"的最大值，也是"什么都不误报"的最小值。`evidenceMin: 1` 会打在正常 markdown 上；`3` 就已经漏掉两个真实的刷屏。
+
+关键形态的逐块实测（默认阈值，`blockChars: 128`）：
+
+| 语料 | meaning | noise | variety | runs | 结果 |
+|---|---|---|---|---|---|
+| `*** ` 刷屏 | 0.000 | 1.00 | 0.04 | 32 | 第 **1** 块触发 |
+| 单条 600 字符星号 | 0.000 | 1.00 | 0.02 | 1 | 第 **1** 块触发 |
+| 轮转 emoji 刷屏 | 0.000 | 1.00 | 0.06 | 0 | 第 **1** 块触发 |
+| 200 个不同 emoji、不重复 | 0.000 | 1.00 | 1.33 | 0 | 第 **1** 块触发 |
+| 中文标点糊 | 0.000 | 1.00 | 0.13 | 0 | 第 **1** 块触发 |
+| 变体英文推理 | 0.972 | 0.03 | 0.60 | 0 | 不触发 |
+| markdown 表格 | 0.333 | 0.67 | 0.25 | 9 | 不触发（门槛关） |
+| 代码块 | 0.719 | 0.28 | 0.54 | 0 | 不触发 |
+| 正文里 200 字符 `====` 分隔线 | 0.047 | 0.95 | 0.19 | 1 | 不触发（连续块数到不了 2） |
+| 带文字标签的 ASCII 框 | 0.108 | 0.89 | 0.23 | 4 | 不触发（门槛关） |
+| 作为标注的 emoji | 0.752 | 0.25 | 0.63 | 0 | 不触发 |
+
+### 为什么它和透镜 A 不重复
+
+上表里"200 个不同 emoji、不重复"就是第二个透镜存在的理由。它的循环步长与块大小互质，所以**没有任何两块逐字节相同**，4 元 shingle 集合也永远对不上（实测重叠 ≈ 0.28，而 `noveltyOverlap` 是 0.70）。**透镜 A 在构造上就是看不见它的**；透镜 B 两块之内就抓住。两个方向都有测试钉住——包括反方向：重复型的刷屏通常还是透镜 A 先抓到。
+
+两个透镜在另一个方向上也是互补的：**带实词的退化形态**（`* 检查 * 检查 * 检查`、`好的好的好的`）不在本透镜的射程内，它们恰好是透镜 A 重复规则的目标。
 
 ## 你说的两条需求，逐条对应
 
@@ -98,6 +171,19 @@ dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
     toolFailureHistory: 64         # 每轮最多记住多少条失败
     toolFailureSignatures: text    # text = 参数+错误码+归一化错误文本；code = 只到错误码
 
+    # A2. 退化输出（*** / emoji 刷屏）
+    degeneracyGuard: true          # 退化熔断总开关
+    degeneracyOnAnswer: false      # 是否也看"回答流"（默认关：打断正在读的输出代价更大）
+    degEvidenceMin: 2              # 除硬门槛外还需几项证据（实测 2 最优）
+    degStreak: 2                   # 连续几块退化才中止（2 块 = 256 码元）
+    degMeaningRatioMax: 0.08       # 硬门槛：字母+数字 / 非空白 ≤ 此值 = "没有实词了"
+    degNoiseRatioMin: 0.65         # 标点+emoji / 非空白 ≥ 此值
+    degVarietyRatioMax: 0.3        # 去重字形 / 前 48 个非空白 ≤ 此值
+    degRunLenMin: 24               # 单条符号连跑 ≥ 此长度（`====` 分隔线只有 1 条）
+    degRunCountMin: 3              # 符号连跑（≥3）条数 ≥ 此值（`***` 刷屏有很多条）
+    degEmojiMin: 8                 # 单块 emoji 数量下限
+    degEmojiRatioMin: 0.4          # 单块 emoji 密度下限
+
     # 检测器
     blockChars: 128
     historyBlocks: 32
@@ -113,7 +199,8 @@ dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
 ## 中断与回滚
 
 - **关 A 只留 B**：`retryWithoutThinking: false`（熔断仍中止，但不重做）。
-- **关 B 只留 A**：`toolFailureGuard: false`。
+- **关 A2 只留 A**：`degeneracyGuard: false`（退化不再单独中止，重复规则照常）。
+- **关 B 只留 A / A2**：`toolFailureGuard: false`。
 - **全关**：`enabled: false`。
 - **回滚**：从 profile 的 `package.json`（`dependencies` + `dsh.profile.bundles`）移除 `dsh-thinking-breaker`，跑 `pnpm install`，重启。也可把该行改成 `disabled: true`。
 - 插件不写文件、不发网络请求、不改历史。
@@ -127,12 +214,20 @@ dsh plugin --profile desktop add github:wwwwwwwwwwwwwwy/dsh-thinking-breaker
 - **工具失败判定依赖 `result.isError`。** 工具主动把"失败"标成成功时不会进入本熔断（有意为之：那是工具的语义，不该由插件改写）。
 - **每次熔断仍有成本**：至少几百到上千 token 才会被判定。
 
+专门针对退化透镜的：
+
+- **只要块里还有实词，它就看不见——这是设计，也是盲区。** 这是那条保证的另一面：`* 检查 * 检查 * 检查` 和 `好的好的好的` 都带实词，不在射程内，交给透镜 A。
+- **纯符号的 ASCII 美术会被判退化。** 整块都是 `+`/`-`/`|` 且**没有任何文字标签**时，会同时满足门槛和三项证据。如果你的负载会大量画这种东西，第一件事是把 `degStreak` 调到 3。带文字的框（上表实测）是安全的。
+- **门槛是比例，不是词数。** 一块里 95% 是符号、5% 是词，照样过门槛（meaning ratio 0.05 ≤ 0.08），仍可能被中止。这是有意的——中间夹了一个词的 `***` 墙仍然是墙——但这是需要知道的边界。
+- **emoji 判定是启发式的。** 用 `\p{Extended_Pictographic}` 减去一份"技术文本会当字用的象形符"黑名单（箭头、`©`、`®`、`™`）。误分类只会让一个字形在 `emoji-flood` 和 `noisy` 两个信号之间移动，两者都是次要证据，所以**检出能力不受影响**；但日志里的规则名对冷门符号可能不准。
+- **默认不看"回答流"。** 打断用户正在读的输出，代价比打断一个念头大；如果这个取舍对你合适，打开 `degeneracyOnAnswer`。
+
 ## 测试
 
 ```bash
-node --test test/detector.test.mjs test/plugin.test.mjs   # 59 个测试
+node --test test/detector.test.mjs test/degeneracy.test.mjs test/plugin.test.mjs  # 132 个测试
 node tools/verify-cordis-contract.mjs                     # 宿主契约回归
-node tools/calibrate.mjs                                  # 重新标定阈值
+node tools/calibrate.mjs                                  # 重新标定两张阈值表
 ```
 
 ## 上线前 bug 排查记录（找到并修掉的真问题）
@@ -145,3 +240,9 @@ node tools/calibrate.mjs                                  # 重新标定阈值
 4. **死状态 `tripTurn`。** 三处写入、零处读取，且顶部注释还在描述一个已不存在的机制。已删除并改正注释（保留死状态是未来 bug 的温床）。
 5. **非拉丁字符的指纹退化。** 原本用 `charCodeAt(i) & 0xffffffff` 折叠，低代理项会与 BMP 码位混同；中文/emoji 思考文本下可能削弱检测。改为按**码点**折叠，并加了"块边界切开代理对"的专门测试。
 6. **非 `accept` 决策下不得吞掉指引。** 若下游把结果拦成非 `accept`，指引必须保持待投递而不是丢失——有测试钉住。
+
+### 1.2.0 期间找到并改掉的设计缺陷
+
+7. **"五选三投票"这个设计本身就是错的。** 第一版把五个信号平等投票、够 3 项就判退化。标定立刻打脸：**markdown 表格正好拿到 3 项**（noisy + low-variety + run-heavy），卡在阈值上——靠调参把它压下去，就意味着真实刷屏也要一起被压下去。改成"`meaningless` 硬门槛 + 至少 2 项次要证据"之后，表格被**结构性**排除（它含实词），而不是被阈值排除。标定量化了这件事：去掉门槛，3 个正常语料会误报。
+8. **星号刷屏其实同时是"重复"。** `*** ` 每 4 个字符就重复一次，所以两支都开时**重复规则通常先触发**。这不是 bug，但会让测试错误归因——测试里必须显式关掉重复支路（`minRepeatGap` 拉高）才能验证退化支路。更重要的是它反过来提出了真正的问题：**有没有"退化但重复规则抓不到"的形态？** 有（200 个不同 emoji、步长与块大小互质），这才是这个支路存在的理由，也成了回归测试。
+9. **箭头不是 emoji。** `U+2194` 在 `\p{Extended_Pictographic}` 里，于是一串 `A → B → C` 依赖链会被当成 emoji 刷屏。加了技术文本象形符黑名单（箭头、`©`、`®`、`™` 等），并把"箭头不算 emoji"写成断言。

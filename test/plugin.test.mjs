@@ -724,3 +724,251 @@ test('a cycle in tool arguments does not hang or throw', async () => {
   const gate = await stub.call('tools/pre-execute', exec, async () => ({ kind: 'allow' }));
   assert.equal(gate.kind, 'allow');
 });
+
+// ---------------------------------------------------------------------------
+// The degeneracy arm (arm A2): a stream that stops meaning anything
+// ---------------------------------------------------------------------------
+
+/**
+ * Silence the repetition arm so a test can attribute a trip to arm A2 alone.
+ *
+ * A `minRepeatGap` above any reachable block gap disables `exact-repeat` and
+ * `low-novelty` outright (see detector.js: a candidate is skipped when
+ * `gap < minRepeatGap`), leaving only the degeneracy lens live. This matters
+ * because a `*** ` flood is ALSO repetitive — it repeats every four characters —
+ * so with both arms armed the repetition rule usually wins the race. That is
+ * correct behaviour, and it is pinned separately below.
+ */
+const ONLY_DEGENERACY = { minRepeatGap: 100000, noveltyStreak: 100000 };
+
+/** Text deltas for an answer stream. */
+function textChunks(texts) {
+  return texts.map((text) => ({ type: 'text-delta', index: 1, text }));
+}
+
+/** Split a corpus into fixed-size deltas, to pin how early a trip lands. */
+function sliced(text, size) {
+  const out = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out;
+}
+
+/** Drive a stream of arbitrary chunks and collect what came out. */
+async function streamOnce(stub, sessionId, chunks, options = { sessionId }) {
+  const stream = await stub.call('llm/stream', options, async function* () {
+    for (const c of chunks) yield c;
+  });
+  return drain(stream);
+}
+
+/** The reported failure shape: the model starts emitting literal asterisks. */
+const STAR_FLOOD = '*** '.repeat(200);
+
+/**
+ * A flood the repetition rules provably MISS.
+ *
+ * 200 distinct pictographs cycled with a stride co-prime to the block size: no
+ * two blocks are byte-identical (so `exact-repeat` cannot fire), and because the
+ * stride never returns to the same phase inside the detector's 32-block history,
+ * the 4-gram shingle sets stay far below `noveltyOverlap` (measured ~0.28).
+ *
+ * This is the shape the degeneracy arm exists for, and the only honest way to
+ * show the two lenses are not redundant.
+ */
+function variedEmojiFlood(count = 500) {
+  const alphabet = [];
+  for (let i = 0; i < 200; i++) alphabet.push(String.fromCodePoint(0x1f300 + i));
+  const out = [];
+  for (let i = 0; i < count; i++) out.push(alphabet[(i * 37) % alphabet.length]);
+  return out.join('');
+}
+
+/** Healthy reasoning that happens to contain markdown rules. */
+function healthyWithRules(sections = 60) {
+  const out = [];
+  for (let i = 0; i < sections; i++) {
+    out.push(`第${i}步：核对项${(i * 7919) % 104729}，理由${(i * 13) % 9973}指向情形${(i * 31) % 7919}。`);
+    if (i % 4 === 3) out.push('\n\n***\n\n');
+    if (i % 7 === 6) out.push('\n\n---\n\n');
+  }
+  return out.join('\n');
+}
+
+test('a reasoning stream of literal *** is aborted by the degeneracy arm', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, ONLY_DEGENERACY);
+  const out = await streamOnce(stub, 'deg1', reasoningChunks(sliced(STAR_FLOOD, 40)));
+
+  const finish = out.find((c) => c.type === 'finish');
+  assert.ok(finish, 'the host validator requires a terminal finish chunk');
+  assert.equal(finish.reason.kind, 'aborted');
+  assert.equal(finish.reason.failure.code, 'ABORTED');
+  assert.match(finish.reason.failure.message, /symbol-flood/, 'the rule must name the flood');
+  assert.equal(out.at(-1), finish, 'the finish chunk must be terminal');
+});
+
+test('the star flood is cut inside two blocks, not after a loop is confirmed', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, ONLY_DEGENERACY);
+  const out = await streamOnce(stub, 'deg1b', reasoningChunks(sliced(STAR_FLOOD, 40)));
+  const relayed = out.filter((c) => c.type === 'reasoning-delta').length;
+  // 6 deltas of 40 = 240 code units relayed; the 7th completes the second block
+  // and is swallowed. Compare with the repetition rule, which needs 1280.
+  assert.equal(relayed, 6, `the degeneracy window is two blocks (256 code units), relayed ${relayed}`);
+});
+
+test('an emoji flood the repetition rules miss is still caught', async () => {
+  const flood = variedEmojiFlood();
+
+  // First establish the premise: with the degeneracy arm off, nothing fires.
+  const loopOnly = makeCtx();
+  apply(loopOnly.ctx, { degeneracyGuard: false });
+  const missed = await streamOnce(loopOnly, 'deg2a', reasoningChunks([flood]));
+  assert.equal(
+    missed.some((c) => c.type === 'finish'),
+    false,
+    'premise: the repetition arm alone must NOT catch a non-repeating emoji flood',
+  );
+
+  // Then show the degeneracy arm does.
+  const stub = makeCtx();
+  apply(stub.ctx, {});
+  const out = await streamOnce(stub, 'deg2b', reasoningChunks([flood]));
+  const finish = out.find((c) => c.type === 'finish');
+  assert.ok(finish, 'the degeneracy arm must catch it');
+  assert.match(finish.reason.failure.message, /emoji-flood/);
+});
+
+test('the trip log carries the evidence and the measurements', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, ONLY_DEGENERACY);
+  await streamOnce(stub, 'deg3', reasoningChunks([STAR_FLOOD]));
+  const warn = stub.logs.find(([level, args]) => level === 'warn' && String(args[0]).includes('trip:'));
+  assert.ok(warn, 'a degeneracy trip must be logged');
+
+  // The stub logger keeps the format string and the arguments apart, so assert
+  // on each rather than on a concatenation.
+  const args = warn[1];
+  assert.match(String(args[0]), /stream=%s/, 'the log format must declare the stream field');
+  assert.equal(args[3], 'reasoning', 'the trip must be attributed to the reasoning stream');
+  assert.equal(args[4], 'symbol-flood', 'the rule must be passed to the log');
+  assert.equal(args[5], STAR_FLOOD.length, 'the reasoning-character count must be passed');
+
+  const detail = String(args.at(-1));
+  assert.match(detail, /^evidence=meaningless\+noisy\+low-variety\+run-heavy /);
+  assert.match(detail, /block=1 /);
+  assert.match(detail, /noise=1 /);
+  assert.match(detail, /meaning=0 /);
+  assert.match(detail, /maxRun=3 runs=32/);
+});
+
+test('a healthy stream containing markdown *** rules is untouched', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, {});
+  const chunks = reasoningChunks([healthyWithRules()]);
+  const out = await streamOnce(stub, 'deg4', chunks);
+  assert.deepEqual(out, chunks, 'a markdown rule must never be mistaken for a flood');
+});
+
+test('both arms stay live when the flood is also a loop', async () => {
+  // `*** ` repeats every four characters, so with everything armed the
+  // repetition rule normally wins. Either way the request is aborted — that is
+  // the guarantee, and which lens got there first is not part of it.
+  const stub = makeCtx();
+  apply(stub.ctx, {});
+  const out = await streamOnce(stub, 'deg5', reasoningChunks(sliced(STAR_FLOOD, 40)));
+  const finish = out.find((c) => c.type === 'finish');
+  assert.ok(finish, 'a repetitive flood must abort whichever arm sees it first');
+  assert.equal(finish.reason.kind, 'aborted');
+});
+
+test('degeneracyGuard=false makes only the degeneracy arm inert', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, { degeneracyGuard: false });
+  const chunks = reasoningChunks([variedEmojiFlood()]);
+  const out = await streamOnce(stub, 'deg6', chunks);
+  assert.deepEqual(out, chunks, 'the non-repeating flood must pass through untouched');
+
+  // The repetition arm must still be live: a genuine loop still trips.
+  const looped = await streamOnce(stub, 'deg6b', reasoningChunks(loopDeltas()));
+  assert.equal(looped.find((c) => c.type === 'finish')?.reason.kind, 'aborted');
+});
+
+test('the answer stream is not watched unless degeneracyOnAnswer is on', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, ONLY_DEGENERACY);
+  const chunks = textChunks([STAR_FLOOD]);
+  const out = await streamOnce(stub, 'deg7', chunks);
+  assert.deepEqual(out, chunks, 'answer output must be left alone by default');
+});
+
+test('degeneracyOnAnswer=true aborts a degenerate answer stream', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, { degeneracyOnAnswer: true });
+  const out = await streamOnce(stub, 'deg8', textChunks([STAR_FLOOD]));
+  const finish = out.find((c) => c.type === 'finish');
+  assert.ok(finish, 'the answer flood must be aborted');
+  assert.equal(finish.reason.kind, 'aborted');
+  assert.match(finish.reason.failure.message, /runaway answer stream/);
+  assert.equal(out.some((c) => c.type === 'text-delta'), false, 'no garbage may reach the user');
+});
+
+test('a degeneracy trip arms the same no-think retry as a loop trip', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, { ...ONLY_DEGENERACY });
+  await stub.call('agent/request', { agent: { id: 'deg9' }, turn: 1 }, async () => ({
+    provider: 'p',
+    model: 'm',
+    reasoningEffort: 'high',
+  }));
+  const out = await streamOnce(stub, 'deg9', reasoningChunks([STAR_FLOOD]));
+  const failure = out.find((c) => c.type === 'finish').reason.failure;
+
+  const recovered = await stub.call(
+    'agent/request-error',
+    { agent: { id: 'deg9' }, turn: 1, failure },
+    async () => ({ kind: 'terminal' }),
+  );
+  assert.deepEqual(recovered, { kind: 'retry' }, 'the degeneracy trip must be recovered once');
+
+  const retryAttempt = await stub.call('agent/request', { agent: { id: 'deg9' }, turn: 1 }, async () => ({
+    provider: 'p',
+    model: 'm',
+    reasoningEffort: 'high',
+  }));
+  assert.equal(retryAttempt.reasoningEffort, 'off', 'the retry must answer without re-thinking');
+});
+
+test('degStreak reaches the detector through the config', async () => {
+  const stub = makeCtx();
+  apply(stub.ctx, { ...ONLY_DEGENERACY, degStreak: 4 });
+  const out = await streamOnce(stub, 'deg10', reasoningChunks([STAR_FLOOD]));
+  assert.ok(out.some((c) => c.type === 'finish'), 'a wider window must still trip');
+  const warn = stub.logs.find(([level, args]) => level === 'warn' && String(args[0]).includes('trip:'));
+  assert.match(warn[1].map(String).join(' '), /block=3/, 'the trip must land on the fourth block');
+});
+
+test('degEvidenceMin reaches the detector through the config', async () => {
+  // Punctuation soup raises the gate plus two secondary signals; demanding three
+  // must silence it while the unambiguous star flood still trips.
+  const soup = '\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A'.repeat(200);
+
+  const lenient = makeCtx();
+  apply(lenient.ctx, ONLY_DEGENERACY);
+  assert.ok(
+    (await streamOnce(lenient, 'deg11a', reasoningChunks([soup]))).some((c) => c.type === 'finish'),
+    'punctuation soup trips at the default evidence bar',
+  );
+
+  const strict = makeCtx();
+  apply(strict.ctx, { ...ONLY_DEGENERACY, degEvidenceMin: 3 });
+  assert.equal(
+    (await streamOnce(strict, 'deg11b', reasoningChunks([soup]))).some((c) => c.type === 'finish'),
+    false,
+    'a stricter evidence bar must suppress the marginal shape',
+  );
+  assert.ok(
+    (await streamOnce(strict, 'deg11c', reasoningChunks([STAR_FLOOD]))).some((c) => c.type === 'finish'),
+    'the unambiguous flood must still trip under the stricter bar',
+  );
+});

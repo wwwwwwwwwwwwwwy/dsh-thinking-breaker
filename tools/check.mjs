@@ -46,16 +46,18 @@ for (const f of files) {
 console.log(`=== syntax: ${syntaxOk ? `all ${files.length} modules parse` : 'FAILED'}`);
 
 // 2. tests
-run('tests (detector + plugin)', process.execPath, [
+run('tests (detector + degeneracy + plugin)', process.execPath, [
   '--test',
   'test/detector.test.mjs',
+  'test/degeneracy.test.mjs',
   'test/plugin.test.mjs',
 ]);
 
 // 3. host contract regression
 run('host contract', process.execPath, ['tools/verify-cordis-contract.mjs']);
 
-// 4. calibration must still separate loops from clean corpora
+// 4. calibration must still separate loops from clean corpora, and degenerate
+//    streams from clean ones
 run('calibration', process.execPath, ['tools/calibrate.mjs']);
 
 // 5. release must stay dependency-free

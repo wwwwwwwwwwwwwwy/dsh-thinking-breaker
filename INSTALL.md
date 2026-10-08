@@ -61,7 +61,7 @@ If you want the settings form, install the plugin in a way that installs its dep
 
 ```bash
 cd /absolute/path/to/dsh-thinking-breaker && npm pack
-dsh plugin --profile desktop add /absolute/path/to/dsh-thinking-breaker/dsh-thinking-breaker-1.1.0.tgz
+dsh plugin --profile desktop add /absolute/path/to/dsh-thinking-breaker/dsh-thinking-breaker-1.2.0.tgz
 ```
 
 ## Verify it is working
@@ -69,12 +69,30 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-thinking-breaker/dsh-thin
 After a restart, the plugin's log lines are the signal:
 
 ```
-[thinking-breaker] trip: session=... turn=... rule=low-novelty reasoningChars=... — request aborted
+[thinking-breaker] trip: session=... turn=... stream=reasoning rule=low-novelty reasoningChars=... — request aborted
+[thinking-breaker] trip: session=... turn=... stream=reasoning rule=symbol-flood reasoningChars=... detail=evidence=meaningless+noisy+low-variety+run-heavy ... — request aborted
+[thinking-breaker] trip: session=... turn=... stream=reasoning rule=emoji-flood reasoningChars=... — request aborted
 [thinking-breaker] agent/request-error: ... recovering loop abort with a fresh attempt (1/1)
 [thinking-breaker] post-trip hint delivered: session=... tool=... trips=1
 [thinking-breaker] tool failures x2 in this turn: session=... tool=... — injecting change-approach guidance
 [thinking-breaker] denying repeated failing call: session=... tool=... after 3 failures
 ```
+
+`rule=` names which lens fired and why. `low-novelty` / `exact-repeat` come from the repetition detector; `symbol-flood` (a wall of `***`), `emoji-flood` and `degenerate-output` come from the degeneracy detector. A degeneracy line carries its full evidence set and the measurements behind the verdict, so a false positive can be diagnosed from the log alone.
+
+## Tuning the degeneracy breaker
+
+If it fires on output you consider legitimate, the levers are, in the order worth trying:
+
+```yaml
+config:
+  degStreak: 3              # demand one more consecutive degenerate block
+  degEvidenceMin: 3         # demand one more secondary signal
+  degeneracyOnAnswer: false # ensure the answer stream is not watched (this is the default)
+  degeneracyGuard: false    # disable the arm entirely; the repetition arm stays live
+```
+
+If it does *not* fire on output you consider degenerate, lower `degStreak` to 1 (aborts on the first full block) or `degEvidenceMin` to 1 — but re-run `node tools/calibrate.mjs` first, because `evidenceMin: 1` is measured to trip on legitimate markdown.
 
 ## Disabling and rollback
 
@@ -83,6 +101,7 @@ Disable one arm only:
 ```yaml
 config:
   retryWithoutThinking: false   # keep detecting/aborting, stop the auto-retry
+  degeneracyGuard: false        # disable the degeneracy arm
   toolFailureGuard: false       # disable the tool arm
 ```
 
